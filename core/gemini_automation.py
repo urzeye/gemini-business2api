@@ -1,10 +1,11 @@
 """
 Gemini自动化登录模块（用于新账号注册）
 """
+import os
 import random
 import string
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -14,6 +15,22 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 # 常量
 AUTH_HOME_URL = "https://auth.business.gemini.google/"
 DEFAULT_XSRF_TOKEN = "KdLRzKwwBTD5wo8nUollAbY6cW0"
+
+# Linux 下常见的 Chromium 路径
+CHROMIUM_PATHS = [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+]
+
+
+def _find_chromium_path() -> Optional[str]:
+    """查找可用的 Chromium/Chrome 浏览器路径"""
+    for path in CHROMIUM_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 class GeminiAutomation:
@@ -55,6 +72,13 @@ class GeminiAutomation:
     def _create_page(self) -> ChromiumPage:
         """创建浏览器页面"""
         options = ChromiumOptions()
+
+        # 自动检测 Chromium 浏览器路径（Linux/Docker 环境）
+        chromium_path = _find_chromium_path()
+        if chromium_path:
+            options.set_browser_path(chromium_path)
+            self._log("info", f"using browser: {chromium_path}")
+
         options.set_argument("--incognito")
         options.set_argument("--no-sandbox")
         options.set_argument("--disable-setuid-sandbox")
@@ -466,10 +490,14 @@ class GeminiAutomation:
             host = next((c["value"] for c in cookies if c["name"] == "__Host-C_OSES"), None)
 
             ses_obj = next((c for c in cookies if c["name"] == "__Secure-C_SES"), None)
+            # 使用北京时区，确保时间计算正确（Cookie expiry 是 UTC 时间戳）
+            beijing_tz = timezone(timedelta(hours=8))
             if ses_obj and "expiry" in ses_obj:
-                expires_at = datetime.fromtimestamp(ses_obj["expiry"] - 43200).strftime("%Y-%m-%d %H:%M:%S")
+                # 将 UTC 时间戳转为北京时间，再减去12小时作为刷新窗口
+                cookie_expire_beijing = datetime.fromtimestamp(ses_obj["expiry"], tz=beijing_tz)
+                expires_at = (cookie_expire_beijing - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
             else:
-                expires_at = (datetime.now() + timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+                expires_at = (datetime.now(beijing_tz) + timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
 
             config = {
                 "id": email,
