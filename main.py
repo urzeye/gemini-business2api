@@ -844,10 +844,7 @@ async def admin_logout(request: Request):
     logger.info("[AUTH] Admin logout")
     return {"success": True}
 
-@app.get("/admin/health")
-@require_login()
-async def admin_health(request: Request):
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
 
 @app.get("/admin/stats")
 @require_login()

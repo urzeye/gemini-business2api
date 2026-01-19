@@ -123,11 +123,11 @@ class RegisterService(BaseTaskService[RegisterTask]):
         # Linux 环境强制使用 DP 无头模式（无图形界面无法运行有头模式）
         import sys
         is_linux = sys.platform.startswith("linux")
+        log_cb("info", f"[DEBUG] platform={sys.platform}, engine={browser_engine}, headless={headless}, is_linux={is_linux}")
         if is_linux:
-            if browser_engine != "dp" or not headless:
-                log_cb("warning", "Linux environment: forcing DP engine with headless mode")
-                browser_engine = "dp"
-                headless = True
+            log_cb("info", "[DEBUG] Linux detected, forcing DP headless mode")
+            browser_engine = "dp"
+            headless = True
 
         if browser_engine == "dp":
             # DrissionPage 引擎：支持有头和无头模式
