@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 
 from core.account import load_accounts_from_source
 from core.base_task_service import BaseTask, BaseTaskService, TaskCancelledError, TaskStatus
@@ -19,7 +19,6 @@ logger = logging.getLogger("gemini.login")
 
 # 常量定义
 CONFIG_CHECK_INTERVAL_SECONDS = 60  # 配置检查间隔（秒）
-REFRESH_COOLDOWN_SECONDS = 3600  # 刷新完成后的冷却时间（1小时内不重复刷新）
 
 
 @dataclass
@@ -35,7 +34,7 @@ class LoginTask(BaseTask):
 
 
 class LoginService(BaseTaskService[LoginTask]):
-    """登录服务类"""
+    """登录服务类 - 统一任务管理"""
 
     def __init__(
         self,
@@ -58,97 +57,60 @@ class LoginService(BaseTaskService[LoginTask]):
             log_prefix="REFRESH",
         )
         self._is_polling = False
-        # 账户级别的刷新状态追踪
-        self._refreshing_accounts: Set[str] = set()  # 正在刷新的账户ID
-        self._last_refresh_time: Dict[str, float] = {}  # 账户上次刷新完成时间
-        self._refresh_lock = asyncio.Lock()  # 刷新状态锁
 
-    def is_account_refreshing(self, account_id: str) -> bool:
-        """检查账户是否正在刷新"""
-        return account_id in self._refreshing_accounts
-
-    def get_refreshing_accounts(self) -> List[str]:
-        """获取正在刷新的账户列表"""
-        return list(self._refreshing_accounts)
-
-    def _can_refresh_account(self, account_id: str) -> bool:
-        """检查账户是否可以刷新（未在刷新中且不在冷却期内）"""
-        # 正在刷新中
-        if account_id in self._refreshing_accounts:
-            return False
-        # 检查冷却期
-        last_time = self._last_refresh_time.get(account_id)
-        if last_time and (time.time() - last_time) < REFRESH_COOLDOWN_SECONDS:
-            return False
-        return True
+    def _get_running_task(self) -> Optional[LoginTask]:
+        """获取正在运行或等待中的任务"""
+        for task in self._tasks.values():
+            if isinstance(task, LoginTask) and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                return task
+        return None
 
     async def start_login(self, account_ids: List[str]) -> LoginTask:
-        """启动登录任务（无排队，直接执行，过滤已在刷新的账户）。"""
+        """
+        启动登录任务 - 统一任务管理
+        - 如果有正在运行的任务，将新账户添加到该任务（去重）
+        - 如果没有正在运行的任务，创建新任务
+        """
         async with self._lock:
-            # 过滤掉正在刷新或在冷却期的账户
-            filtered_ids = [
-                aid for aid in (account_ids or [])
-                if self._can_refresh_account(aid)
-            ]
+            if not account_ids:
+                raise ValueError("账户列表不能为空")
 
-            if not filtered_ids:
-                # 所有账户都在刷新中或冷却期，返回一个空任务
-                task = LoginTask(id=str(uuid.uuid4()), account_ids=[])
-                task.status = TaskStatus.SUCCESS
-                task.finished_at = time.time()
-                self._tasks[task.id] = task
-                self._append_log(task, "info", "📝 所有账户已在刷新中或冷却期内，跳过")
-                return task
+            # 检查是否有正在运行的任务
+            running_task = self._get_running_task()
 
-            # 检查是否有正在运行的任务包含这些账户
-            for existing in self._tasks.values():
-                if (
-                    isinstance(existing, LoginTask)
-                    and existing.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
-                ):
-                    # 从 filtered_ids 中移除已在任务中的账户
-                    filtered_ids = [
-                        aid for aid in filtered_ids
-                        if aid not in existing.account_ids
-                    ]
+            if running_task:
+                # 将新账户添加到现有任务（去重）
+                new_accounts = [aid for aid in account_ids if aid not in running_task.account_ids]
 
-            if not filtered_ids:
-                # 所有账户都已在现有任务中
-                for existing in self._tasks.values():
-                    if existing.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                        return existing
-                # 返回空任务
-                task = LoginTask(id=str(uuid.uuid4()), account_ids=[])
-                task.status = TaskStatus.SUCCESS
-                task.finished_at = time.time()
-                self._tasks[task.id] = task
-                return task
+                if new_accounts:
+                    running_task.account_ids.extend(new_accounts)
+                    self._append_log(
+                        running_task,
+                        "info",
+                        f"📝 添加 {len(new_accounts)} 个账户到现有任务 (总计: {len(running_task.account_ids)})"
+                    )
+                else:
+                    self._append_log(running_task, "info", "📝 所有账户已在当前任务中")
 
-            # 标记这些账户为正在刷新
-            for aid in filtered_ids:
-                self._refreshing_accounts.add(aid)
+                return running_task
 
-            task = LoginTask(id=str(uuid.uuid4()), account_ids=filtered_ids)
+            # 创建新任务
+            task = LoginTask(id=str(uuid.uuid4()), account_ids=list(account_ids))
             self._tasks[task.id] = task
             self._append_log(task, "info", f"📝 创建刷新任务 (账号数量: {len(task.account_ids)})")
 
-            # 直接启动任务，不排队
+            # 直接启动任务
             self._current_task_id = task.id
             asyncio.create_task(self._run_task_directly(task))
             return task
 
     async def _run_task_directly(self, task: LoginTask) -> None:
-        """直接执行任务（不通过队列）"""
+        """直接执行任务"""
         try:
             await self._run_one_task(task)
         finally:
-            # 任务完成后，更新刷新状态
+            # 任务完成后清理
             async with self._lock:
-                now = time.time()
-                for aid in task.account_ids:
-                    self._refreshing_accounts.discard(aid)
-                    # 记录刷新完成时间（无论成功失败）
-                    self._last_refresh_time[aid] = now
                 if self._current_task_id == task.id:
                     self._current_task_id = None
 
@@ -348,7 +310,7 @@ class LoginService(BaseTaskService[LoginTask]):
 
 
     def _get_expiring_accounts(self) -> List[str]:
-        """获取即将过期且可以刷新的账户列表"""
+        """获取即将过期的账户列表"""
         accounts = load_accounts_from_source()
         expiring = []
         beijing_tz = timezone(timedelta(hours=8))
@@ -357,11 +319,6 @@ class LoginService(BaseTaskService[LoginTask]):
         for account in accounts:
             account_id = account.get("id")
             if not account_id:
-                continue
-
-            # 检查是否可以刷新（未在刷新中且不在冷却期）
-            if not self._can_refresh_account(account_id):
-                logger.debug(f"[LOGIN] 跳过账户 {account_id}：正在刷新或在冷却期内")
                 continue
 
             if account.get("disabled"):

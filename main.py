@@ -1280,16 +1280,6 @@ async def admin_get_current_login_task(request: Request):
         return {"status": "idle"}
     return task.to_dict()
 
-@app.get("/admin/login/refreshing")
-@require_login()
-async def admin_get_refreshing_accounts(request: Request):
-    """获取正在刷新的账户列表"""
-    if not login_service:
-        raise HTTPException(503, "login service unavailable")
-    return {
-        "refreshing_accounts": login_service.get_refreshing_accounts()
-    }
-
 @app.post("/admin/login/check")
 @require_login()
 async def admin_check_login_refresh(request: Request):

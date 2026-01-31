@@ -94,7 +94,7 @@
         <button
           class="rounded-full border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors
                  hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="isRegistering"
+          :disabled="isRegistering || isRefreshing"
           @click="openRegisterModal"
         >
           添加账户
@@ -155,10 +155,10 @@
             <button
               type="button"
               class="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
-              :class="isRefreshing
+              :class="isRegistering
                 ? 'cursor-not-allowed text-muted-foreground'
                 : 'text-foreground hover:bg-accent'"
-              :disabled="isRefreshing"
+              :disabled="isRegistering"
               @click="handleRefreshExpiring(); closeMoreActions()"
             >
               刷新过期
@@ -166,10 +166,10 @@
             <button
               type="button"
               class="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
-              :class="!selectedCount || isRefreshing
+              :class="!selectedCount || isRegistering
                 ? 'cursor-not-allowed text-muted-foreground'
                 : 'text-foreground hover:bg-accent'"
-              :disabled="!selectedCount || isRefreshing"
+              :disabled="!selectedCount || isRegistering"
               @click="handleRefreshSelected(); closeMoreActions()"
             >
               刷新选中
@@ -1258,7 +1258,7 @@ const loginLogClearMarker = ref<TaskLogLine | null>(null)
 const registerAgreed = ref(false)
 const registerTask = ref<RegisterTask | null>(null)
 const loginTask = ref<LoginTask | null>(null)
-const refreshingAccounts = ref<Set<string>>(new Set())  // 正在刷新的账户ID集合
+const refreshingAccountIds = ref<Set<string>>(new Set())  // 正在刷新的账户ID集合（仅用于显示状态）
 const taskLogsRef = ref<HTMLDivElement | null>(null)
 const isRegistering = ref(false)
 const isRefreshing = ref(false)
@@ -2270,7 +2270,7 @@ onBeforeUnmount(() => {
 
 const statusLabel = (account: AdminAccount) => {
   // 检查是否正在刷新
-  if (refreshingAccounts.value.has(account.id)) {
+  if (refreshingAccountIds.value.has(account.id)) {
     return '刷新中'
   }
   if (account.cooldown_reason?.includes('429') && account.cooldown_seconds > 0) {
@@ -2808,18 +2808,23 @@ const updateLoginTask = async (taskId: string) => {
     if (error?.status === 404 || error?.message === 'Not found') {
       clearLoginTimer()
       isRefreshing.value = false
-      refreshingAccounts.value = new Set()  // 清空刷新状态
+      refreshingAccountIds.value = new Set()  // 清空刷新状态
       return
     }
     throw error
   }
   syncLoginTask(task)
+
   // 更新正在刷新的账户列表
-  await updateRefreshingAccounts()
+  if (task.status === 'running' || task.status === 'pending') {
+    refreshingAccountIds.value = new Set(task.account_ids || [])
+  } else {
+    refreshingAccountIds.value = new Set()  // 任务完成，清空刷新状态
+  }
+
   if (task.status !== 'running' && task.status !== 'pending') {
     isRefreshing.value = false
     clearLoginTimer()
-    refreshingAccounts.value = new Set()  // 任务完成，清空刷新状态
     await refreshAccounts()
 
     // 显示任务完成通知
@@ -2883,17 +2888,6 @@ const startBackgroundTaskPolling = () => {
 const loadCurrentTasks = async () => {
   await loadCurrentTaskByKind('register')
   await loadCurrentTaskByKind('login')
-  // 同时更新正在刷新的账户列表
-  await updateRefreshingAccounts()
-}
-
-const updateRefreshingAccounts = async () => {
-  try {
-    const result = await accountsApi.getRefreshingAccounts()
-    refreshingAccounts.value = new Set(result.refreshing_accounts || [])
-  } catch {
-    // 忽略错误，保持现有状态
-  }
 }
 
 const handleRegister = async () => {
@@ -2914,20 +2908,29 @@ const handleRegister = async () => {
   }
 }
 
-const handleRefreshSelected = async () => {
-  if (!selectedIds.value.size) return
+// 统一的刷新函数 - 所有刷新入口都调用这个
+const startRefresh = async (accountIds: string[]) => {
+  if (!accountIds.length) return
   automationError.value = ''
   isRefreshing.value = true
   try {
-    const task = await accountsApi.startLogin(Array.from(selectedIds.value))
+    const task = await accountsApi.startLogin(accountIds)
     syncLoginTask(task)
+    // 更新正在刷新的账户列表
+    refreshingAccountIds.value = new Set(task.account_ids || [])
     startLoginPolling(task.id)
     // 自动打开任务状态弹窗
     openTaskModal()
   } catch (error: any) {
     automationError.value = error.message || '启动刷新失败'
+    toast.error(error.message || '启动刷新失败')
     isRefreshing.value = false
   }
+}
+
+const handleRefreshSelected = async () => {
+  if (!selectedIds.value.size) return
+  await startRefresh(Array.from(selectedIds.value))
 }
 
 const handleRefreshExpiring = async () => {
@@ -2937,6 +2940,8 @@ const handleRefreshExpiring = async () => {
     const taskOrIdle = await accountsApi.checkLogin()
     if (taskOrIdle && 'id' in taskOrIdle) {
       syncLoginTask(taskOrIdle)
+      // 更新正在刷新的账户列表
+      refreshingAccountIds.value = new Set(taskOrIdle.account_ids || [])
       startLoginPolling(taskOrIdle.id)
       // 自动打开任务状态弹窗
       openTaskModal()
@@ -2946,6 +2951,8 @@ const handleRefreshExpiring = async () => {
     const current = await accountsApi.getLoginCurrent()
     if (current && 'id' in current) {
       syncLoginTask(current)
+      // 更新正在刷新的账户列表
+      refreshingAccountIds.value = new Set(current.account_ids || [])
       startLoginPolling(current.id)
       openTaskModal()
       return
@@ -2953,6 +2960,7 @@ const handleRefreshExpiring = async () => {
     isRefreshing.value = false
   } catch (error: any) {
     automationError.value = error.message || '触发刷新失败'
+    toast.error(error.message || '触发刷新失败')
     isRefreshing.value = false
   }
 }

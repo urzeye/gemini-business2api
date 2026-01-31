@@ -73,9 +73,6 @@ export const accountsApi = {
   getLoginCurrent: () =>
     apiClient.get<never, LoginTask | { status: string }>('/admin/login/current'),
 
-  getRefreshingAccounts: () =>
-    apiClient.get<never, { refreshing_accounts: string[] }>('/admin/login/refreshing'),
-
   cancelLoginTask: (taskId: string, reason?: string) =>
     apiClient.post<{ reason?: string }, LoginTask>(`/admin/login/cancel/${taskId}`, reason ? { reason } : {}),
 
